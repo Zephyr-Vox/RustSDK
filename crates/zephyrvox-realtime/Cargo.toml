@@ -6,5 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
 zephyrvox-types = { path = "../zephyrvox-types" }
 zephyrvox-wire = { path = "../zephyrvox-wire" }
