@@ -40,6 +40,19 @@ fn success_without_data_is_rejected() {
     ));
 }
 
+#[test]
+fn success_with_a_message_is_rejected() {
+    let envelope = ApiEnvelope::<Value> {
+        code: 0,
+        message: "unexpected status".to_owned(),
+        data: Some(Value::Null),
+    };
+    assert!(matches!(
+        envelope.into_result(),
+        Err(EnvelopeError::NonEmptySuccessMessage)
+    ));
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct ExampleData {
     id: String,

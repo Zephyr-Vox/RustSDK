@@ -31,6 +31,10 @@ fn snowflake_range_is_strict() {
         Err(zephyrvox_types::IdError::SnowflakeOutOfRange(_))
     ));
     assert!(serde_json::from_str::<Snowflake>("1.5").is_err());
+    assert!(matches!(
+        Snowflake::from_str("-1"),
+        Err(zephyrvox_types::IdError::NegativeSnowflake)
+    ));
 }
 
 #[test]
@@ -64,6 +68,8 @@ fn cursors_are_opaque_but_not_empty() {
     );
     assert!(Cursor::new("").is_err());
     assert!(serde_json::from_str::<Cursor>(r#""""#).is_err());
+    assert!(Cursor::new("cursor/with/slash").is_err());
+    assert!(Cursor::new("x".repeat(Cursor::MAX_LENGTH + 1)).is_err());
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! Wire-level contracts shared by the SDK transports.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod constants;
 mod envelope;
@@ -14,7 +15,8 @@ pub use constants::{
 };
 pub use envelope::{ApiEnvelope, ApiError, EnvelopeError};
 pub use headers::{
-    AUTHORIZATION, COMMAND_ID, CONTROL_CONNECTION, GEID, IDEMPOTENCY_KEY, IF_MATCH,
-    PARENT_IF_MATCH, STATE_CURSOR, STREAM_EPOCH, SYNC_REQUIRED,
+    AUTHORIZATION, COMMAND_ID, CONTROL_CONNECTION, GEID, HeaderError, IDEMPOTENCY_KEY, IF_MATCH,
+    IdempotencyKey, MAX_IDEMPOTENCY_KEY_LENGTH, MIN_IDEMPOTENCY_KEY_LENGTH, PARENT_IF_MATCH,
+    STATE_CURSOR, STREAM_EPOCH, SYNC_REQUIRED,
 };
 pub use server_card::{Fingerprint, ServerCard, ServerCardError, TransportScheme};

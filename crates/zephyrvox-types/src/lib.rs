@@ -5,6 +5,7 @@
 //! high-level client facade.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod errors;
 mod fixed_ids;

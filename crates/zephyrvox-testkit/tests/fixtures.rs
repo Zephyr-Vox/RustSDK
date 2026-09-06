@@ -31,6 +31,31 @@ fn fixture_loader_rejects_path_escape() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn fixture_loader_rejects_symlink_escape() {
+    use std::{fs, os::unix::fs::symlink, time::SystemTime};
+
+    let suffix = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("zephyrvox-fixtures-{suffix}"));
+    let outside = root.with_extension("outside");
+    fs::create_dir_all(&root).expect("root");
+    fs::write(&outside, "outside").expect("outside fixture");
+    symlink(&outside, root.join("link.json")).expect("symlink");
+
+    let loader = FixtureLoader::new(&root);
+    assert!(matches!(
+        loader.read_bytes("link.json"),
+        Err(FixtureError::InvalidName(_))
+    ));
+
+    fs::remove_dir_all(&root).expect("remove root");
+    fs::remove_file(outside).expect("remove outside fixture");
+}
+
 #[derive(Debug, Deserialize)]
 struct ExampleFixture {
     name: String,

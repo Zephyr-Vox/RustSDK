@@ -273,8 +273,7 @@ pub struct StateEvent {
     /// Event sequence identifier.
     pub geid: Geid,
     /// Recipient-authenticated cursor after this event.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<Cursor>,
+    pub cursor: Cursor,
     /// Event class, currently state.
     pub class: String,
     /// Event visibility scope.

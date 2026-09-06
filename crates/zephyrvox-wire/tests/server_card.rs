@@ -20,9 +20,9 @@ fn plain_card_round_trips_with_stable_query_order() {
 }
 
 #[test]
-fn tls_card_requires_and_normalizes_the_fingerprint() {
+fn tls_card_requires_a_lowercase_fingerprint() {
     let fingerprint =
-        Fingerprint::parse_hex("AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899")
+        Fingerprint::parse_hex("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
             .expect("fingerprint");
     let card = ServerCard::new("::1", 443, TransportScheme::Tls, Some(fingerprint), None)
         .expect("TLS card");
@@ -35,6 +35,12 @@ fn tls_card_requires_and_normalizes_the_fingerprint() {
         card
     );
     assert_eq!(card.fingerprint(), Some(fingerprint));
+    assert!(fingerprint.ct_eq(&fingerprint));
+    assert!(!fingerprint.ct_eq(&Fingerprint::from_bytes([0; 32])));
+    assert!(
+        Fingerprint::parse_hex("AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899")
+            .is_err()
+    );
 }
 
 #[test]

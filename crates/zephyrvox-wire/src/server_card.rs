@@ -1,4 +1,9 @@
-use std::{fmt, net::IpAddr, str::FromStr};
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    net::IpAddr,
+    str::FromStr,
+};
 
 use thiserror::Error;
 use url::{Url, form_urlencoded::Serializer};
@@ -30,7 +35,7 @@ impl TransportScheme {
 }
 
 /// A 32-byte SPKI SHA-256 fingerprint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 pub struct Fingerprint([u8; 32]);
 
 impl Fingerprint {
@@ -44,7 +49,7 @@ impl Fingerprint {
         &self.0
     }
 
-    /// Parses exactly 64 hexadecimal characters.
+    /// Parses exactly 64 lowercase hexadecimal characters.
     pub fn parse_hex(value: &str) -> Result<Self, ServerCardError> {
         if value.len() != 64 {
             return Err(ServerCardError::InvalidFingerprint {
@@ -74,6 +79,33 @@ impl Fingerprint {
         }
         output
     }
+
+    /// Compares two fingerprints without exiting early on a differing byte.
+    ///
+    /// TLS pin verification should use this method, or the `PartialEq`
+    /// implementation which delegates to it, after validating the peer
+    /// certificate and hostname.
+    pub fn ct_eq(&self, other: &Self) -> bool {
+        let mut difference = 0_u8;
+        for (left, right) in self.0.iter().zip(other.0) {
+            difference |= left ^ right;
+        }
+        difference == 0
+    }
+}
+
+impl PartialEq for Fingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other)
+    }
+}
+
+impl Eq for Fingerprint {}
+
+impl Hash for Fingerprint {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
 }
 
 impl fmt::Display for Fingerprint {
@@ -86,7 +118,6 @@ fn hex_value(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
         b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
     }
 }
@@ -338,7 +369,10 @@ pub enum ServerCardError {
     UnexpectedFingerprint,
     /// The fingerprint was not exactly 64 hexadecimal characters.
     #[error("invalid SPKI fingerprint: {value}")]
-    InvalidFingerprint { value: String },
+    InvalidFingerprint {
+        /// The non-canonical fingerprint text supplied by the caller.
+        value: String,
+    },
     /// The port was zero.
     #[error("server card port must be non-zero")]
     InvalidPort,

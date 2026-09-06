@@ -50,6 +50,9 @@ where
     /// data.fields, while successful data must be present.
     pub fn into_result(self) -> Result<T, EnvelopeError> {
         if self.code == 0 {
+            if !self.message.is_empty() {
+                return Err(EnvelopeError::NonEmptySuccessMessage);
+            }
             return self.data.ok_or(EnvelopeError::MissingSuccessData);
         }
 
@@ -140,6 +143,9 @@ pub enum EnvelopeError {
     /// A success envelope omitted its data value.
     #[error("successful API envelope omitted data")]
     MissingSuccessData,
+    /// A success envelope violated the empty-message convention.
+    #[error("successful API envelope must have an empty message")]
+    NonEmptySuccessMessage,
     /// Error data could not be converted to JSON for inspection.
     #[error("could not serialize API error data: {0}")]
     DataSerialization(String),

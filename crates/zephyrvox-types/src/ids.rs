@@ -45,9 +45,13 @@ impl FromStr for Snowflake {
     type Err = IdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let number = value
-            .parse::<u64>()
-            .map_err(|_| IdError::InvalidDecimal(value.to_owned()))?;
+        let number = value.parse::<u64>().map_err(|_| {
+            if value.parse::<i64>().is_ok_and(|number| number < 0) {
+                IdError::NegativeSnowflake
+            } else {
+                IdError::InvalidDecimal(value.to_owned())
+            }
+        })?;
         Self::new(number)
     }
 }
@@ -103,7 +107,10 @@ impl<'de> Visitor<'de> for SnowflakeVisitor {
     where
         E: de::Error,
     {
-        if value <= 0 {
+        if value < 0 {
+            return Err(E::custom(IdError::NegativeSnowflake));
+        }
+        if value == 0 {
             return Err(E::custom(IdError::ZeroSnowflake));
         }
         Snowflake::new(value as u64).map_err(E::custom)
@@ -239,11 +246,29 @@ impl<'de> Deserialize<'de> for Geid {
 pub struct Cursor(String);
 
 impl Cursor {
+    /// The maximum encoded length accepted by the v1 cursor wire contract.
+    pub const MAX_LENGTH: usize = 256;
+
     /// Creates a non-empty opaque cursor without interpreting its contents.
+    ///
+    /// v1 cursors are unpadded base64url tokens.  This method validates only
+    /// that outer grammar and length; it does not decode or inspect the
+    /// authenticated payload.
     pub fn new(value: impl Into<String>) -> Result<Self, IdError> {
         let value = value.into();
         if value.is_empty() {
             return Err(IdError::EmptyCursor);
+        }
+        if value.len() > Self::MAX_LENGTH {
+            return Err(IdError::CursorTooLong {
+                max: Self::MAX_LENGTH,
+                actual: value.len(),
+            });
+        }
+        for (index, character) in value.bytes().enumerate() {
+            if !matches!(character, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_') {
+                return Err(IdError::InvalidCursorCharacter { index });
+            }
         }
         Ok(Self(value))
     }
@@ -251,6 +276,14 @@ impl Cursor {
     /// Returns the exact opaque cursor text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl FromStr for Cursor {
+    type Err = IdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
     }
 }
 

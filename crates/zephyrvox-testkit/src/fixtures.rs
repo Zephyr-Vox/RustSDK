@@ -63,7 +63,12 @@ impl FixtureLoader {
         }) {
             return Err(FixtureError::InvalidName(name.to_owned()));
         }
-        Ok(self.root.join(name))
+        let root = fs::canonicalize(&self.root).map_err(FixtureError::Io)?;
+        let path = fs::canonicalize(root.join(name)).map_err(FixtureError::Io)?;
+        if !path.starts_with(&root) {
+            return Err(FixtureError::InvalidName(name.to_owned()));
+        }
+        Ok(path)
     }
 }
 
