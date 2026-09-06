@@ -127,7 +127,7 @@ fn hex_digit(value: u8) -> char {
 }
 
 /// A parsed and validated CommunityServer connection card.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerCard {
     scheme: TransportScheme,
     host: String,
@@ -135,6 +135,20 @@ pub struct ServerCard {
     fingerprint: Option<Fingerprint>,
     invite: Option<String>,
     protocol_version: u8,
+}
+
+impl fmt::Debug for ServerCard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServerCard")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("fingerprint", &self.fingerprint)
+            .field("invite", &self.invite.as_ref().map(|_| "<redacted>"))
+            .field("protocol_version", &self.protocol_version)
+            .finish()
+    }
 }
 
 impl ServerCard {

@@ -8,8 +8,12 @@ pub const AUTHORIZATION: &str = "Authorization";
 pub const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
 /// Resource ETag precondition header.
 pub const IF_MATCH: &str = "If-Match";
+/// Resource ETag response header.
+pub const ETAG: &str = "ETag";
 /// Parent resource ETag precondition header.
 pub const PARENT_IF_MATCH: &str = "X-Zephyr-Parent-If-Match";
+/// Parent resource ETag response header.
+pub const PARENT_ETAG: &str = "X-Zephyr-Parent-ETag";
 /// Active WebSocket control connection identifier.
 pub const CONTROL_CONNECTION: &str = "X-Zephyr-Control-Connection";
 /// Server command identifier returned by a committed mutation.

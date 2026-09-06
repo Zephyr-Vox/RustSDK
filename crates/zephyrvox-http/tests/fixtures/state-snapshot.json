@@ -1,0 +1,32 @@
+{
+  "cursor": "opaque-cursor",
+  "stream_epoch": "00112233445566778899aabbccddeeff",
+  "geid": "42",
+  "state_version": "7",
+  "state": {
+    "server": {
+      "name": "Example Community",
+      "version": "0.1.0"
+    },
+    "self": {
+      "user": {
+        "id": "123",
+        "username": "alice",
+        "nickname": "Alice",
+        "avatar": null
+      },
+      "server_role_keys": ["member"],
+      "server_permissions": ["channel.read"],
+      "presence": {
+        "status": "online",
+        "activity": null
+      },
+      "voice_authority": null
+    },
+    "users": [],
+    "roles": [],
+    "groups": [],
+    "channels": [],
+    "voice_memberships": []
+  }
+}

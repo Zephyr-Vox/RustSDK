@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{ControlConnectionId, Cursor, Geid, SessionId, Snowflake, StreamEpoch};
@@ -35,6 +35,7 @@ pub struct User {
     /// Display nickname.
     pub nickname: String,
     /// Optional avatar reference.
+    #[serde(deserialize_with = "deserialize_optional_avatar")]
     pub avatar: Option<String>,
 }
 
@@ -46,9 +47,18 @@ pub struct UserPresence {
     /// Display nickname.
     pub nickname: String,
     /// Optional avatar reference.
+    #[serde(deserialize_with = "deserialize_optional_avatar")]
     pub avatar: Option<String>,
     /// Privacy-projected presence.
     pub presence: Presence,
+}
+
+fn deserialize_optional_avatar<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let avatar = Option::<String>::deserialize(deserializer)?;
+    Ok(avatar.filter(|avatar| !avatar.is_empty()))
 }
 
 /// A server-scoped role definition.
