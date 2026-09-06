@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex as StdMutex, RwLock,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -40,7 +40,8 @@ pub(crate) struct ConnectionInner {
     pub(crate) status_tx: watch::Sender<ConnectionStatus>,
     pub(crate) event_tx: broadcast::Sender<ClientEvent>,
     pub(crate) outbound: Mutex<Option<mpsc::Sender<String>>>,
-    pub(crate) pending: Mutex<HashMap<String, oneshot::Sender<Result<CommandAck, RealtimeError>>>>,
+    pub(crate) pending:
+        StdMutex<HashMap<String, oneshot::Sender<Result<CommandAck, RealtimeError>>>>,
     pub(crate) sequence: AtomicU64,
     pub(crate) stop_tx: watch::Sender<bool>,
     pub(crate) stopped: AtomicBool,
@@ -102,7 +103,7 @@ impl ControlConnection {
             status_tx,
             event_tx,
             outbound: Mutex::new(None),
-            pending: Mutex::new(HashMap::new()),
+            pending: StdMutex::new(HashMap::new()),
             sequence: AtomicU64::new(0),
             stop_tx,
             stopped: AtomicBool::new(false),
@@ -186,8 +187,10 @@ impl ControlConnection {
     /// or [`RealtimeError::ServerCommand`] for a structured server rejection.
     pub async fn set_presence(&self, presence: Presence) -> Result<CommandAck, RealtimeError> {
         let command = PresenceCommand::from(presence);
-        self.send_command(|request_id| encode_presence_set(request_id, &command))
-            .await
+        self.send_command(false, |request_id| {
+            encode_presence_set(request_id, &command)
+        })
+        .await
     }
 
     /// Renews the current WebSocket access lease with an access token.
@@ -198,8 +201,10 @@ impl ControlConnection {
         &self,
         access_token: AccessToken,
     ) -> Result<CommandAck, RealtimeError> {
-        self.send_command(|request_id| encode_auth_update(request_id, &access_token))
-            .await
+        self.send_command(true, |request_id| {
+            encode_auth_update(request_id, &access_token)
+        })
+        .await
     }
 
     /// Requests an orderly shutdown and waits for the background task to stop.
@@ -220,19 +225,34 @@ impl ControlConnection {
     }
 
     /// Inserts one bounded pending waiter, sends its payload through the
-    /// single socket owner, and removes the waiter on ACK, close, or timeout.
-    async fn send_command<F>(&self, encode: F) -> Result<CommandAck, RealtimeError>
+    /// single socket owner, and removes the waiter on ACK, close, timeout, or
+    /// cancellation. Authentication renewal is also allowed during the
+    /// ready/syncing phases because the server accepts `auth.update` before
+    /// replay completes.
+    async fn send_command<F>(
+        &self,
+        allow_before_live: bool,
+        encode: F,
+    ) -> Result<CommandAck, RealtimeError>
     where
         F: FnOnce(&str) -> Result<String, RealtimeError>,
     {
-        if self.status() != ConnectionStatus::Live {
+        let status = self.status();
+        if status != ConnectionStatus::Live
+            && !(allow_before_live
+                && matches!(status, ConnectionStatus::Ready | ConnectionStatus::Syncing))
+        {
             return Err(RealtimeError::NotLive);
         }
         let request_id = self.next_request_id();
         let payload = encode(&request_id)?;
         let (sender, receiver) = oneshot::channel();
         {
-            let mut pending = self.inner.pending.lock().await;
+            let mut pending = self
+                .inner
+                .pending
+                .lock()
+                .map_err(|_| RealtimeError::Closed)?;
             if pending.len() >= self.inner.config.maximum_pending_commands() {
                 return Err(RealtimeError::Protocol(
                     "pending command capacity is full".to_owned(),
@@ -240,22 +260,21 @@ impl ControlConnection {
             }
             pending.insert(request_id.clone(), sender);
         }
+        let _pending_guard = PendingCommandGuard {
+            inner: Arc::clone(&self.inner),
+            request_id: request_id.clone(),
+        };
         let outbound = self.inner.outbound.lock().await.clone();
         let Some(outbound) = outbound else {
-            self.inner.pending.lock().await.remove(&request_id);
             return Err(RealtimeError::NotLive);
         };
         if outbound.send(payload).await.is_err() {
-            self.inner.pending.lock().await.remove(&request_id);
             return Err(RealtimeError::Closed);
         }
         match tokio::time::timeout(self.inner.config.command_timeout(), receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RealtimeError::Closed),
-            Err(_) => {
-                self.inner.pending.lock().await.remove(&request_id);
-                Err(RealtimeError::CommandTimeout)
-            }
+            Err(_) => Err(RealtimeError::CommandTimeout),
         }
     }
 
@@ -266,7 +285,24 @@ impl ControlConnection {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_millis();
-        format!("zv-{millis:x}-{sequence:x}")
+        format!("zv-{millis:011x}-{sequence:016x}")
+    }
+}
+
+/// Removes a command waiter if its caller drops the future before the server
+/// responds. The map uses a short synchronous lock so cancellation does not
+/// need to spawn an untracked cleanup task.
+struct PendingCommandGuard {
+    inner: Arc<ConnectionInner>,
+    request_id: String,
+}
+
+impl Drop for PendingCommandGuard {
+    /// Removes the waiter when the command future is cancelled or completes.
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.remove(&self.request_id);
+        }
     }
 }
 

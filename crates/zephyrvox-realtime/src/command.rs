@@ -26,6 +26,7 @@ pub struct PresenceCommand {
 }
 
 impl From<Presence> for PresenceCommand {
+    /// Converts the shared presence DTO into the wire command shape.
     fn from(presence: Presence) -> Self {
         Self {
             status: presence.status,

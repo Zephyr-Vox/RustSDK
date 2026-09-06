@@ -1,5 +1,5 @@
 use crate::{ConnectionStatus, UnknownFrame};
-use zephyrvox_types::{ControlConnectionId, StateEvent};
+use zephyrvox_types::{ControlConnectionId, StateEvent, VoiceAuthority};
 
 /// Events emitted by a [`crate::ControlConnection`] in arrival order.
 ///
@@ -25,6 +25,13 @@ pub enum ClientEvent {
     },
     /// One validated ordered state event was installed.
     State(StateEvent),
+    /// The latest complete snapshot no longer contains the previously bound
+    /// voice authority. Hosts should stop the old media session before acting
+    /// on any replacement authority in the new state.
+    VoiceLost {
+        /// Authority that became invalid at the snapshot boundary.
+        authority: VoiceAuthority,
+    },
     /// A socket generation ended before another one was started.
     Disconnected {
         /// Diagnostic reason without credentials or voice keys.

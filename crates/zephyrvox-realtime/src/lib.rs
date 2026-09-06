@@ -35,7 +35,7 @@ pub use frame::{
 };
 pub use future::BoxFuture;
 pub use provider::SnapshotProvider;
-pub use state::{ApplyOutcome, StateStore};
+pub use state::{ApplyOutcome, StateEventReceiver, StateStore};
 pub use sync::{SyncMachine, SyncPhase};
 pub use token::AccessToken;
 pub use transport::{

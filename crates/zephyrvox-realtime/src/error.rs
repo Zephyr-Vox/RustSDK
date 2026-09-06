@@ -96,9 +96,22 @@ pub enum StateApplyError {
         /// GEID supplied by the rejected event.
         actual: Geid,
     },
+    /// A state event skipped one or more GEIDs and therefore cannot be
+    /// applied without a fresh snapshot.
+    #[error("state stream GEID gap: expected {expected}, got {actual}")]
+    GeidGap {
+        /// The next contiguous GEID after the last accepted event.
+        expected: Geid,
+        /// The GEID supplied by the rejected event.
+        actual: Geid,
+    },
     /// The event named a state transition that this SDK version does not know.
     #[error("unknown state event type: {0}")]
     UnknownEvent(String),
+    /// The event belongs to a visibility transition that must be installed
+    /// from a complete snapshot rather than applied incrementally.
+    #[error("state event requires a full snapshot: {0}")]
+    SnapshotRequired(String),
     /// The event payload did not match the known event's replacement shape.
     #[error("invalid payload for state event {event_type}: {message}")]
     InvalidPayload {
@@ -121,12 +134,25 @@ pub enum SyncError {
     /// Replay frame bounds did not match the events it contained.
     #[error("sync replay GEID bounds are inconsistent")]
     ReplayBounds,
+    /// Live events arriving before replay completion exceeded the bounded
+    /// handoff queue.
+    #[error("queued live state events exceed the synchronization limit")]
+    QueueLimit,
     /// A replay or live event moved backwards in the ordered stream.
     #[error("state stream GEID {actual} is not after {current}")]
     GeidOrder {
         /// Last accepted event GEID.
         current: Geid,
         /// Rejected event GEID.
+        actual: Geid,
+    },
+    /// A replay or live event skipped one or more GEIDs and requires a fresh
+    /// snapshot before synchronization can continue.
+    #[error("state stream GEID gap: expected {expected}, got {actual}")]
+    GeidGap {
+        /// The next contiguous GEID after the last accepted event.
+        expected: Geid,
+        /// The GEID supplied by the rejected event.
         actual: Geid,
     },
     /// A new stream epoch was observed where the current snapshot epoch was

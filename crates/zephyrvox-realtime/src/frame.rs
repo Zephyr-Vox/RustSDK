@@ -118,8 +118,10 @@ struct CommandErrorData {
 /// Returns [`RealtimeError::Json`] for invalid JSON and
 /// [`RealtimeError::Protocol`] for a known frame with invalid data.
 pub fn parse_server_frame(payload: &str) -> Result<ServerFrame, RealtimeError> {
-    let envelope: Envelope =
+    let raw: Value =
         serde_json::from_str(payload).map_err(|error| RealtimeError::Json(error.to_string()))?;
+    let envelope: Envelope = serde_json::from_value(raw.clone())
+        .map_err(|error| RealtimeError::Json(error.to_string()))?;
     match envelope.frame_type.as_str() {
         "connection.ready" => {
             decode(envelope.data, "connection.ready").map(ServerFrame::ConnectionReady)
@@ -128,12 +130,7 @@ pub fn parse_server_frame(payload: &str) -> Result<ServerFrame, RealtimeError> {
         "sync.complete" => decode(envelope.data, "sync.complete").map(ServerFrame::SyncComplete),
         "sync.required" => decode(envelope.data, "sync.required").map(ServerFrame::SyncRequired),
         "state.event" => {
-            let event: StateEvent = decode(envelope.data, "state.event")?;
-            if event.frame_type != "state.event" || event.class != "state" {
-                return Err(RealtimeError::Protocol(
-                    "state.event must use frame type state.event and class state".to_owned(),
-                ));
-            }
+            let event: StateEvent = decode(raw, "state.event")?;
             Ok(ServerFrame::StateEvent(event))
         }
         "command.ok" => {

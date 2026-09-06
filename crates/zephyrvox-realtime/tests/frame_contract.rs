@@ -46,6 +46,12 @@ fn parses_ready_replay_and_command_frames() {
         }
         other => panic!("unexpected frame: {other:?}"),
     }
+
+    let live = parse_server_frame(
+        r#"{"type":"state.event","geid":"1","cursor":"cursor-1","class":"state","scope":{"type":"server"},"event_type":"server.updated","server_time":1,"data":{}}"#,
+    )
+    .unwrap();
+    assert!(matches!(live, ServerFrame::StateEvent(_)));
 }
 
 #[test]
@@ -71,7 +77,10 @@ fn unknown_non_state_frame_is_retained_but_unknown_state_is_not_silently_accepte
     assert!(matches!(telemetry, ServerFrame::Unknown(_)));
 
     let malformed = parse_server_frame(
-        r#"{"type":"state.event","data":{"type":"state.event","geid":"1","cursor":"cursor-1","class":"message","scope":{"type":"server"},"event_type":"server.updated","server_time":1,"data":{}}}"#,
+        r#"{"type":"state.event","geid":"1","cursor":"cursor-1","class":"message","scope":{"type":"server"},"event_type":"server.updated","server_time":1,"data":{}}"#,
     );
-    assert!(malformed.is_err());
+    assert!(matches!(
+        malformed,
+        Ok(ServerFrame::StateEvent(event)) if event.class == "message"
+    ));
 }

@@ -1,11 +1,77 @@
 #![allow(dead_code)]
 
-use std::str::FromStr;
+use std::{collections::VecDeque, str::FromStr, sync::Arc};
+
+use tokio::sync::{Mutex, mpsc};
+
+use zephyrvox_realtime::{
+    AccessToken, BoxFuture, RealtimeError, SnapshotProvider, WebSocketConnector, WebSocketMessage,
+    WebSocketSession,
+};
 
 use zephyrvox_types::{
     Channel, ClientState, ControlConnectionId, Cursor, Geid, Group, Presence, Role, SelfUserState,
     ServerState, SnapshotState, Snowflake, StateEvent, StateSnapshot, StreamEpoch, User,
 };
+
+pub struct FakeProvider;
+
+impl SnapshotProvider for FakeProvider {
+    fn snapshot(&self) -> BoxFuture<'static, Result<StateSnapshot, RealtimeError>> {
+        Box::pin(async { Ok(snapshot()) })
+    }
+
+    fn access_token(&self) -> BoxFuture<'static, Result<AccessToken, RealtimeError>> {
+        Box::pin(async { AccessToken::new("access-1") })
+    }
+}
+
+pub struct FakeSession {
+    pub incoming: mpsc::Receiver<WebSocketMessage>,
+    pub outgoing: mpsc::Sender<String>,
+}
+
+impl WebSocketSession for FakeSession {
+    fn send_text<'a>(&'a mut self, text: String) -> BoxFuture<'a, Result<(), RealtimeError>> {
+        Box::pin(async move {
+            self.outgoing
+                .send(text)
+                .await
+                .map_err(|_| RealtimeError::Closed)
+        })
+    }
+
+    fn send_pong<'a>(&'a mut self, _payload: Vec<u8>) -> BoxFuture<'a, Result<(), RealtimeError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn receive<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<WebSocketMessage>, RealtimeError>> {
+        Box::pin(async move { Ok(self.incoming.recv().await) })
+    }
+
+    fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), RealtimeError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub struct FakeConnector {
+    pub sessions: Arc<Mutex<VecDeque<FakeSession>>>,
+}
+
+impl WebSocketConnector for FakeConnector {
+    fn connect(
+        &self,
+        _url: url::Url,
+        _access_token: AccessToken,
+    ) -> BoxFuture<'static, Result<Box<dyn WebSocketSession>, RealtimeError>> {
+        let session = Arc::clone(&self.sessions);
+        Box::pin(async move {
+            let mut sessions = session.lock().await;
+            let session = sessions.pop_front().ok_or(RealtimeError::Closed)?;
+            Ok(Box::new(session) as Box<dyn WebSocketSession>)
+        })
+    }
+}
 
 pub fn snapshot() -> StateSnapshot {
     let user_id = Snowflake::new(1).unwrap();

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{
     Connector, WebSocketStream, connect_async_tls_with_config,
-    tungstenite::{Message, client::IntoClientRequest},
+    tungstenite::{
+        Error as TungsteniteError, Message, client::IntoClientRequest, protocol::WebSocketConfig,
+    },
 };
 use url::Url;
 
@@ -19,8 +21,20 @@ pub enum WebSocketMessage {
     Ping(Vec<u8>),
     /// Peer pong payload.
     Pong(Vec<u8>),
-    /// Close frame and optional UTF-8 reason.
+    /// Close notification supplied by a transport that does not expose its
+    /// WebSocket close code.
     Close(Option<String>),
+    /// Close frame including the protocol code when the transport exposes it.
+    ///
+    /// The connection coordinator uses server-defined terminal codes, such as
+    /// authentication expiry, to stop reconnecting instead of treating every
+    /// close as a transient network failure.
+    CloseFrame {
+        /// WebSocket close code, if the peer supplied a close frame.
+        code: Option<u16>,
+        /// Optional UTF-8 close reason.
+        reason: Option<String>,
+    },
 }
 
 /// One connected WebSocket session.
@@ -80,15 +94,10 @@ impl WebSocketConnector for TokioTungsteniteConnector {
     ) -> BoxFuture<'static, Result<Box<dyn WebSocketSession>, RealtimeError>> {
         let card = self.card.clone();
         Box::pin(async move {
-            let expected_scheme = match card.scheme() {
-                TransportScheme::Plain => "ws",
-                TransportScheme::Tls => "wss",
-            };
-            if url.scheme() != expected_scheme {
-                return Err(RealtimeError::Protocol(format!(
-                    "WebSocket URL scheme {} does not match server card",
-                    url.scheme()
-                )));
+            if !url_matches_card(&url, &card) {
+                return Err(RealtimeError::Protocol(
+                    "WebSocket URL does not match server card authority".to_owned(),
+                ));
             }
             let mut request = url
                 .as_str()
@@ -108,21 +117,48 @@ impl WebSocketConnector for TokioTungsteniteConnector {
             } else {
                 None
             };
-            let (stream, _) =
-                match connect_async_tls_with_config(request, None, true, connector).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        if let Some(failure) = pin_failure
-                            .and_then(|failure| failure.lock().ok().and_then(|recorded| *recorded))
-                        {
-                            return Err(failure.into_error());
-                        }
-                        return Err(RealtimeError::Transport(error.to_string()));
+            let websocket_config = WebSocketConfig::default()
+                .max_message_size(Some(256 * 1024))
+                .max_frame_size(Some(256 * 1024));
+            let (stream, _) = match connect_async_tls_with_config(
+                request,
+                Some(websocket_config),
+                true,
+                connector,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    if let Some(failure) = pin_failure
+                        .and_then(|failure| failure.lock().ok().and_then(|recorded| *recorded))
+                    {
+                        return Err(failure.into_error());
                     }
-                };
+                    return Err(map_upgrade_error(error));
+                }
+            };
             Ok(Box::new(TokioTungsteniteSession { stream }) as Box<dyn WebSocketSession>)
         })
     }
+}
+
+/// Confines the production connector to the card authority and fixed v1 path.
+/// This check also protects callers that use the public connector directly
+/// instead of going through [`crate::ControlConnection`].
+fn url_matches_card(url: &Url, card: &ServerCard) -> bool {
+    let expected_scheme = match card.scheme() {
+        TransportScheme::Plain => "ws",
+        TransportScheme::Tls => "wss",
+    };
+    url.scheme() == expected_scheme
+        && url.host_str() == Some(card.host())
+        && url.port_or_known_default() == Some(card.port())
+        && url.path() == "/api/v0/ws"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 struct TokioTungsteniteSession {
@@ -150,23 +186,32 @@ impl WebSocketSession for TokioTungsteniteSession {
 
     fn receive<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<WebSocketMessage>, RealtimeError>> {
         Box::pin(async move {
-            match self.stream.next().await {
-                None => Ok(None),
-                Some(Ok(Message::Text(text))) => Ok(Some(WebSocketMessage::Text(text.to_string()))),
-                Some(Ok(Message::Ping(payload))) => {
-                    Ok(Some(WebSocketMessage::Ping(payload.to_vec())))
+            loop {
+                match self.stream.next().await {
+                    None => return Ok(None),
+                    Some(Ok(Message::Text(text))) => {
+                        return Ok(Some(WebSocketMessage::Text(text.to_string())));
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        return Ok(Some(WebSocketMessage::Ping(payload.to_vec())));
+                    }
+                    Some(Ok(Message::Pong(payload))) => {
+                        return Ok(Some(WebSocketMessage::Pong(payload.to_vec())));
+                    }
+                    Some(Ok(Message::Close(frame))) => {
+                        return Ok(Some(WebSocketMessage::CloseFrame {
+                            code: frame.as_ref().map(|frame| frame.code.into()),
+                            reason: frame.map(|frame| frame.reason.to_string()),
+                        }));
+                    }
+                    Some(Ok(Message::Binary(_))) => {
+                        return Err(RealtimeError::Protocol(
+                            "binary WebSocket frames are not accepted".to_owned(),
+                        ));
+                    }
+                    Some(Ok(Message::Frame(_))) => {}
+                    Some(Err(error)) => return Err(RealtimeError::Transport(error.to_string())),
                 }
-                Some(Ok(Message::Pong(payload))) => {
-                    Ok(Some(WebSocketMessage::Pong(payload.to_vec())))
-                }
-                Some(Ok(Message::Close(frame))) => Ok(Some(WebSocketMessage::Close(
-                    frame.map(|frame| frame.reason.to_string()),
-                ))),
-                Some(Ok(Message::Binary(_))) => Err(RealtimeError::Protocol(
-                    "binary WebSocket frames are not accepted".to_owned(),
-                )),
-                Some(Ok(Message::Frame(_))) => Ok(None),
-                Some(Err(error)) => Err(RealtimeError::Transport(error.to_string())),
             }
         })
     }
@@ -178,5 +223,21 @@ impl WebSocketSession for TokioTungsteniteSession {
                 .await
                 .map_err(|error| RealtimeError::Transport(error.to_string()))
         })
+    }
+}
+
+/// Maps an HTTP response from the WebSocket upgrade into the reconnect
+/// classification used by the connection coordinator.
+fn map_upgrade_error(error: TungsteniteError) -> RealtimeError {
+    match error {
+        TungsteniteError::Http(response) => match response.status().as_u16() {
+            401 => RealtimeError::AuthenticationExpired,
+            403 => RealtimeError::Protocol("WebSocket upgrade was forbidden".to_owned()),
+            _ => RealtimeError::Transport(format!(
+                "WebSocket upgrade failed with HTTP status {}",
+                response.status()
+            )),
+        },
+        error => RealtimeError::Transport(error.to_string()),
     }
 }

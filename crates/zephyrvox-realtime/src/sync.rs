@@ -2,6 +2,9 @@ use zephyrvox_types::{ClientState, ControlConnectionId, Cursor, Geid, StateEvent
 
 use crate::{SyncError, SyncReplay};
 
+const MAX_QUEUED_LIVE_EVENTS: usize = 256;
+const MAX_QUEUED_LIVE_BYTES: usize = 1 << 20;
+
 /// The synchronization phase used by the WebSocket protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncPhase {
@@ -34,6 +37,7 @@ pub struct SyncMachine {
     geid: Geid,
     control_connection_id: Option<ControlConnectionId>,
     queued_live: Vec<StateEvent>,
+    queued_live_bytes: usize,
 }
 
 impl SyncMachine {
@@ -46,6 +50,7 @@ impl SyncMachine {
             geid: state.geid,
             control_connection_id: None,
             queued_live: Vec::new(),
+            queued_live_bytes: 0,
         }
     }
 
@@ -56,7 +61,7 @@ impl SyncMachine {
         self.stream_epoch = state.stream_epoch;
         self.geid = state.geid;
         self.queued_live.clear();
-        self.control_connection_id = None;
+        self.queued_live_bytes = 0;
         self.phase = SyncPhase::Ready;
     }
 
@@ -142,13 +147,14 @@ impl SyncMachine {
         }
         self.phase = SyncPhase::Syncing;
         self.queued_live.clear();
+        self.queued_live_bytes = 0;
         Ok(self.cursor.clone())
     }
 
     /// Validates and accepts one replay batch.
     ///
-    /// GEIDs are required to increase strictly, but need not be adjacent:
-    /// visibility filtering means a client may not receive every global event.
+    /// GEIDs are required to be contiguous and strictly increasing. A gap
+    /// means the snapshot/replay boundary is no longer authoritative.
     pub fn accept_replay(&mut self, replay: &SyncReplay) -> Result<(), SyncError> {
         if self.phase != SyncPhase::Syncing {
             return Err(SyncError::InvalidPhase(format!(
@@ -157,7 +163,7 @@ impl SyncMachine {
             )));
         }
         if replay.events.is_empty() {
-            if replay.from_geid != replay.to_geid {
+            if replay.from_geid != replay.to_geid || replay.from_geid != self.geid {
                 return Err(SyncError::ReplayBounds);
             }
             return Ok(());
@@ -185,8 +191,22 @@ impl SyncMachine {
                 self.phase
             )));
         }
+        let event_bytes = if self.phase == SyncPhase::Syncing {
+            serde_json::to_vec(&event)
+                .map(|encoded| encoded.len())
+                .map_err(|_| SyncError::QueueLimit)?
+        } else {
+            0
+        };
+        if self.phase == SyncPhase::Syncing
+            && (self.queued_live.len() >= MAX_QUEUED_LIVE_EVENTS
+                || self.queued_live_bytes.saturating_add(event_bytes) > MAX_QUEUED_LIVE_BYTES)
+        {
+            return Err(SyncError::QueueLimit);
+        }
         self.accept_ordered_event(&event)?;
         if self.phase == SyncPhase::Syncing {
+            self.queued_live_bytes += event_bytes;
             self.queued_live.push(event);
             Ok(None)
         } else {
@@ -208,6 +228,7 @@ impl SyncMachine {
         }
         self.cursor = complete.cursor.clone();
         self.phase = SyncPhase::Live;
+        self.queued_live_bytes = 0;
         Ok(std::mem::take(&mut self.queued_live))
     }
 
@@ -225,6 +246,7 @@ impl SyncMachine {
             )));
         }
         self.queued_live.clear();
+        self.queued_live_bytes = 0;
         self.phase = SyncPhase::Ready;
         Ok(())
     }
@@ -232,6 +254,7 @@ impl SyncMachine {
     /// Marks the socket disconnected while retaining the last durable cursor.
     pub fn disconnect(&mut self) {
         self.queued_live.clear();
+        self.queued_live_bytes = 0;
         self.control_connection_id = None;
         self.phase = SyncPhase::Disconnected;
     }
@@ -239,17 +262,23 @@ impl SyncMachine {
     /// Marks the socket as entering reconnect backoff.
     pub fn reconnecting(&mut self) {
         self.queued_live.clear();
+        self.queued_live_bytes = 0;
         self.control_connection_id = None;
         self.phase = SyncPhase::Reconnecting;
     }
 
-    /// Advances the stream boundary only after enforcing strict monotonic
-    /// ordering. Global GEIDs may skip values because visibility filtering is
-    /// performed by the server.
+    /// Advances the stream boundary only after enforcing contiguous ordering.
     fn accept_ordered_event(&mut self, event: &StateEvent) -> Result<(), SyncError> {
         if event.geid <= self.geid {
             return Err(SyncError::GeidOrder {
                 current: self.geid,
+                actual: event.geid,
+            });
+        }
+        let expected = Geid::new(self.geid.get().saturating_add(1));
+        if event.geid != expected {
+            return Err(SyncError::GeidGap {
+                expected,
                 actual: event.geid,
             });
         }

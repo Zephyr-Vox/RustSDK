@@ -5,73 +5,12 @@ use std::{collections::VecDeque, sync::Arc, time::Duration};
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
-use support::snapshot;
+use support::{FakeConnector, FakeProvider, FakeSession};
 use zephyrvox_realtime::{
-    AccessToken, BoxFuture, ClientEvent, ConnectionStatus, ControlConnection, RealtimeConfig,
-    RealtimeError, ReconnectPolicy, SnapshotProvider, WebSocketConnector, WebSocketMessage,
-    WebSocketSession,
+    AccessToken, ClientEvent, ConnectionStatus, ControlConnection, RealtimeConfig, RealtimeError,
+    ReconnectPolicy, WebSocketMessage,
 };
-use zephyrvox_types::StateSnapshot;
 use zephyrvox_wire::{ServerCard, TransportScheme};
-
-struct FakeProvider;
-
-impl SnapshotProvider for FakeProvider {
-    fn snapshot(&self) -> BoxFuture<'static, Result<StateSnapshot, RealtimeError>> {
-        Box::pin(async { Ok(snapshot()) })
-    }
-
-    fn access_token(&self) -> BoxFuture<'static, Result<AccessToken, RealtimeError>> {
-        Box::pin(async { AccessToken::new("access-1") })
-    }
-}
-
-struct FakeSession {
-    incoming: mpsc::Receiver<WebSocketMessage>,
-    outgoing: mpsc::Sender<String>,
-}
-
-impl WebSocketSession for FakeSession {
-    fn send_text<'a>(&'a mut self, text: String) -> BoxFuture<'a, Result<(), RealtimeError>> {
-        Box::pin(async move {
-            self.outgoing
-                .send(text)
-                .await
-                .map_err(|_| RealtimeError::Closed)
-        })
-    }
-
-    fn send_pong<'a>(&'a mut self, _payload: Vec<u8>) -> BoxFuture<'a, Result<(), RealtimeError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn receive<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<WebSocketMessage>, RealtimeError>> {
-        Box::pin(async move { Ok(self.incoming.recv().await) })
-    }
-
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), RealtimeError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct FakeConnector {
-    sessions: Arc<Mutex<VecDeque<FakeSession>>>,
-}
-
-impl WebSocketConnector for FakeConnector {
-    fn connect(
-        &self,
-        _url: url::Url,
-        _access_token: AccessToken,
-    ) -> BoxFuture<'static, Result<Box<dyn WebSocketSession>, RealtimeError>> {
-        let session = Arc::clone(&self.sessions);
-        Box::pin(async move {
-            let mut sessions = session.lock().await;
-            let session = sessions.pop_front().ok_or(RealtimeError::Closed)?;
-            Ok(Box::new(session) as Box<dyn WebSocketSession>)
-        })
-    }
-}
 
 #[tokio::test]
 async fn connection_performs_snapshot_handoff_and_correlates_commands() {
@@ -91,7 +30,10 @@ async fn connection_performs_snapshot_handoff_and_correlates_commands() {
             outgoing: outgoing_tx,
         }]))),
     });
-    let config = RealtimeConfig::new().with_reconnect_policy(ReconnectPolicy::disabled());
+    let config = RealtimeConfig::new()
+        .with_maximum_pending_commands(1)
+        .unwrap()
+        .with_reconnect_policy(ReconnectPolicy::disabled());
     let connection =
         ControlConnection::connect_with_connector(Arc::new(FakeProvider), card, config, connector)
             .await
@@ -117,6 +59,42 @@ async fn connection_performs_snapshot_handoff_and_correlates_commands() {
     let hello: Value = serde_json::from_str(&hello).unwrap();
     assert_eq!(hello["type"], "sync.hello");
     assert_eq!(hello["data"]["cursor"], "cursor-0");
+
+    let renewal = tokio::spawn({
+        let connection = connection.clone();
+        async move {
+            connection
+                .update_access(AccessToken::new("access-during-sync").unwrap())
+                .await
+        }
+    });
+    let request = tokio::time::timeout(Duration::from_secs(1), outgoing_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let request: Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(request["type"], "auth.update");
+    assert_eq!(request["data"]["access_token"], "access-during-sync");
+    let request_id = request["request_id"].as_str().unwrap();
+    incoming_tx
+        .send(WebSocketMessage::Text(
+            serde_json::json!({
+                "type": "command.ok",
+                "request_id": request_id,
+                "data": {"command_type":"auth.update","expires_at":4102444800000_i64}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), renewal)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
+
     incoming_tx
         .send(WebSocketMessage::Text(
             r#"{"type":"sync.complete","data":{"cursor":"cursor-0"}}"#.to_owned(),
@@ -125,6 +103,44 @@ async fn connection_performs_snapshot_handoff_and_correlates_commands() {
         .unwrap();
     connection.wait_until_live().await.unwrap();
     assert_eq!(connection.status(), ConnectionStatus::Live);
+
+    let mut gap_status = connection.subscribe_status();
+    incoming_tx
+        .send(WebSocketMessage::Text(
+            serde_json::json!({
+                "type": "state.event",
+                "geid": "2",
+                "cursor": "cursor-2",
+                "class": "state",
+                "scope": {"type": "server"},
+                "event_type": "server.updated",
+                "server_time": 1700000000002_i64,
+                "data": {}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if *gap_status.borrow() == ConnectionStatus::Syncing {
+                break;
+            }
+            gap_status.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let hello = outgoing_rx.recv().await.unwrap();
+    let hello: Value = serde_json::from_str(&hello).unwrap();
+    assert_eq!(hello["type"], "sync.hello");
+    incoming_tx
+        .send(WebSocketMessage::Text(
+            r#"{"type":"sync.complete","data":{"cursor":"cursor-0"}}"#.to_owned(),
+        ))
+        .await
+        .unwrap();
+    connection.wait_until_live().await.unwrap();
 
     let command = tokio::spawn({
         let connection = connection.clone();
@@ -211,6 +227,42 @@ async fn connection_performs_snapshot_handoff_and_correlates_commands() {
         .unwrap();
     connection.wait_until_live().await.unwrap();
 
+    let canceled = tokio::spawn({
+        let connection = connection.clone();
+        async move {
+            connection
+                .set_presence(zephyrvox_types::Presence {
+                    status: "online".to_owned(),
+                    activity: None,
+                })
+                .await
+        }
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(1), outgoing_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    canceled.abort();
+    assert!(canceled.await.unwrap_err().is_cancelled());
+
+    let admitted_after_cancel = tokio::spawn({
+        let connection = connection.clone();
+        async move {
+            connection
+                .set_presence(zephyrvox_types::Presence {
+                    status: "dnd".to_owned(),
+                    activity: None,
+                })
+                .await
+        }
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(1), outgoing_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    admitted_after_cancel.abort();
+    assert!(admitted_after_cancel.await.unwrap_err().is_cancelled());
+
     let pending = tokio::spawn({
         let connection = connection.clone();
         async move {
@@ -228,87 +280,55 @@ async fn connection_performs_snapshot_handoff_and_correlates_commands() {
 }
 
 #[tokio::test]
-async fn reconnect_obtains_a_new_control_id_and_replays_from_the_latest_snapshot() {
+async fn live_status_waits_until_events_queued_during_replay_are_applied() {
     let card = ServerCard::new("localhost", 18080, TransportScheme::Plain, None, None).unwrap();
-
-    let (first_incoming_tx, first_incoming_rx) = mpsc::channel(8);
-    let (first_outgoing_tx, mut first_outgoing_rx) = mpsc::channel(8);
-    first_incoming_tx
+    let (incoming_tx, incoming_rx) = mpsc::channel(8);
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+    incoming_tx
         .send(WebSocketMessage::Text(
             r#"{"type":"connection.ready","data":{"control_connection_id":"00000000000000000000000000000011","access_expires_at":4102444800000}}"#.to_owned(),
         ))
         .await
         .unwrap();
-    let (second_incoming_tx, second_incoming_rx) = mpsc::channel(8);
-    let (second_outgoing_tx, mut second_outgoing_rx) = mpsc::channel(8);
-    second_incoming_tx
-        .send(WebSocketMessage::Text(
-            r#"{"type":"connection.ready","data":{"control_connection_id":"00000000000000000000000000000022","access_expires_at":4102444800000}}"#.to_owned(),
-        ))
-        .await
-        .unwrap();
     let connector = Arc::new(FakeConnector {
-        sessions: Arc::new(Mutex::new(VecDeque::from([
-            FakeSession {
-                incoming: first_incoming_rx,
-                outgoing: first_outgoing_tx,
-            },
-            FakeSession {
-                incoming: second_incoming_rx,
-                outgoing: second_outgoing_tx,
-            },
-        ]))),
+        sessions: Arc::new(Mutex::new(VecDeque::from([FakeSession {
+            incoming: incoming_rx,
+            outgoing: outgoing_tx,
+        }]))),
     });
-    let policy = ReconnectPolicy::new(
-        Duration::from_millis(1),
-        Duration::from_millis(1),
-        Duration::ZERO,
-    )
-    .unwrap()
-    .with_maximum_attempts(Some(1));
-    let config = RealtimeConfig::new().with_reconnect_policy(policy);
+    let config = RealtimeConfig::new().with_reconnect_policy(ReconnectPolicy::disabled());
     let connection =
         ControlConnection::connect_with_connector(Arc::new(FakeProvider), card, config, connector)
             .await
             .unwrap();
+    let mut state_events = connection.state().subscribe_events();
+    let _hello = outgoing_rx.recv().await.unwrap();
 
-    let _ = first_outgoing_rx.recv().await.unwrap();
-    first_incoming_tx
+    incoming_tx
         .send(WebSocketMessage::Text(
-            r#"{"type":"sync.complete","data":{"cursor":"cursor-0"}}"#.to_owned(),
+            serde_json::to_string(&serde_json::json!({
+                "type": "state.event",
+                "geid": "1",
+                "cursor": "cursor-1",
+                "class": "state",
+                "scope": {"type": "server"},
+                "event_type": "server.updated",
+                "server_time": 1700000000001_i64,
+                "data": {}
+            }))
+            .unwrap(),
         ))
         .await
         .unwrap();
-    connection.wait_until_live().await.unwrap();
-    assert_eq!(
-        connection.control_connection_id().await.unwrap().to_hex(),
-        "00000000000000000000000000000011"
-    );
-
-    let mut statuses = connection.subscribe_status();
-    first_incoming_tx
-        .send(WebSocketMessage::Close(Some("network reset".to_owned())))
-        .await
-        .unwrap();
-    loop {
-        let current = *statuses.borrow();
-        if current == ConnectionStatus::Reconnecting {
-            break;
-        }
-        statuses.changed().await.unwrap();
-    }
-    let _ = second_outgoing_rx.recv().await.unwrap();
-    second_incoming_tx
+    incoming_tx
         .send(WebSocketMessage::Text(
-            r#"{"type":"sync.complete","data":{"cursor":"cursor-0"}}"#.to_owned(),
+            r#"{"type":"sync.complete","data":{"cursor":"cursor-1"}}"#.to_owned(),
         ))
         .await
         .unwrap();
-    connection.wait_until_live().await.unwrap();
-    assert_eq!(
-        connection.control_connection_id().await.unwrap().to_hex(),
-        "00000000000000000000000000000022"
-    );
 
+    connection.wait_until_live().await.unwrap();
+    assert_eq!(connection.state().snapshot().await.geid.get(), 1);
+    assert_eq!(state_events.recv().await.unwrap().geid.get(), 1);
     connection.close().await.unwrap();
 }
