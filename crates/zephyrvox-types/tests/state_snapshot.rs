@@ -1,0 +1,25 @@
+use zephyrvox_types::{StateSnapshot, StreamEpoch};
+
+#[test]
+fn snapshot_fixture_decodes_with_string_ids() {
+    let snapshot: StateSnapshot =
+        serde_json::from_str(include_str!("fixtures/state_snapshot.json")).expect("snapshot");
+    assert_eq!(snapshot.geid.get(), 42);
+    assert_eq!(snapshot.state.channels.len(), 1);
+    assert_eq!(snapshot.state.self_state.user.id.get(), 123);
+    assert_eq!(
+        snapshot.stream_epoch,
+        StreamEpoch::parse_hex("00112233445566778899aabbccddeeff").expect("epoch")
+    );
+    assert_eq!(
+        snapshot
+            .state
+            .self_state
+            .voice_authority
+            .as_ref()
+            .unwrap()
+            .channel_id
+            .get(),
+        456
+    );
+}

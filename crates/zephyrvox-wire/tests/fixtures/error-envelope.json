@@ -1,0 +1,10 @@
+{
+  "code": 1000,
+  "message": "invalid request parameters",
+  "data": {
+    "fields": {
+      "username": "must not be empty",
+      "password": "must be at least 8 characters"
+    }
+  }
+}

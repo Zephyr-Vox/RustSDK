@@ -1,0 +1,17 @@
+[package]
+name = "zephyrvox-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zephyrvox-http = { path = "../zephyrvox-http" }
+zephyrvox-realtime = { path = "../zephyrvox-realtime" }
+zephyrvox-sdk = { path = "../zephyrvox-sdk" }
+zephyrvox-types = { path = "../zephyrvox-types" }
+zephyrvox-voice = { path = "../zephyrvox-voice" }
+zephyrvox-wire = { path = "../zephyrvox-wire" }

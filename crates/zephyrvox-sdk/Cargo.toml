@@ -1,0 +1,13 @@
+[package]
+name = "zephyrvox-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zephyrvox-http = { path = "../zephyrvox-http" }
+zephyrvox-realtime = { path = "../zephyrvox-realtime" }
+zephyrvox-types = { path = "../zephyrvox-types" }
+zephyrvox-voice = { path = "../zephyrvox-voice" }
+zephyrvox-wire = { path = "../zephyrvox-wire" }

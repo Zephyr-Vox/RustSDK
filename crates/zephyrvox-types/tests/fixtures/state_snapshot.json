@@ -1,0 +1,50 @@
+{
+  "cursor": "opaque-cursor",
+  "stream_epoch": "00112233445566778899aabbccddeeff",
+  "geid": "42",
+  "state_version": "7",
+  "state": {
+    "server": {
+      "name": "Example Community",
+      "version": "0.1.0"
+    },
+    "self": {
+      "user": {
+        "id": "123",
+        "username": "alice",
+        "nickname": "Alice",
+        "avatar": null
+      },
+      "server_role_keys": ["member"],
+      "server_permissions": ["channel.read"],
+      "presence": {
+        "status": "online",
+        "activity": null
+      },
+      "voice_authority": {
+        "channel_id": "456",
+        "control_connection_id": "00112233445566778899aabbccddeeff",
+        "voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "voice_authority_generation": "1"
+      }
+    },
+    "users": [],
+    "roles": [],
+    "groups": [],
+    "channels": [
+      {
+        "id": "456",
+        "group_id": null,
+        "name": "Lounge",
+        "mode": "voice",
+        "temporary": false,
+        "visibility": "public",
+        "capacity": 256,
+        "position": 0,
+        "pinned": false,
+        "version": "1"
+      }
+    ],
+    "voice_memberships": []
+  }
+}

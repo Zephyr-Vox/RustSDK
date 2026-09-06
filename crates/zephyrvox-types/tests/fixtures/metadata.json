@@ -1,0 +1,23 @@
+{
+  "protocol_version": 1,
+  "voice_endpoint": {
+    "host": "voice.example.test",
+    "port": 40100
+  },
+  "codecs": [
+    {
+      "name": "opus",
+      "clock_rate": 48000,
+      "channels": 2,
+      "ptime": [10, 20, 40, 60]
+    }
+  ],
+  "voice_stream_types": [
+    {
+      "id": 1,
+      "name": "microphone",
+      "mute_kind": "self"
+    }
+  ],
+  "features": ["voice.encrypted"]
+}
