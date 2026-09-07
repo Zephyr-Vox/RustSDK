@@ -39,3 +39,22 @@ default; hosts may opt in for ordinary reconnects with
 `ClientConfig::with_auto_rejoin_voice(true)`, while authority loss and explicit
 leave always clear the remembered join. After an automatic rejoin, await
 `Client::voice_session()` to obtain the replacement handle.
+
+For a live two-client interoperability check, run the opt-in example against a
+CommunityServer instance:
+
+```text
+ZEPHYRVOX_SERVER_CARD=zephyrvox://127.0.0.1:28745?v=1 \
+ZEPHYRVOX_USERNAME=owner \
+ZEPHYRVOX_PASSWORD='owner password' \
+ZEPHYRVOX_PEER_USERNAME=peer \
+ZEPHYRVOX_PEER_PASSWORD='peer password' \
+ZEPHYRVOX_REGISTER_PEER=1 \
+cargo run -p zephyrvox-sdk --example interoperability
+```
+
+The example creates a temporary public voice channel when
+`ZEPHYRVOX_CHANNEL_ID` is absent, verifies presence propagation, then sends
+one opaque encoded frame and checks that the peer receives the same bytes.
+`ZEPHYRVOX_REGISTER_PEER=1` is only needed when the peer account does not yet
+exist.

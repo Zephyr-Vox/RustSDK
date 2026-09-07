@@ -147,6 +147,30 @@ impl VoiceSession {
             .map_err(Into::into)
     }
 
+    /// Sends one encoded payload on a negotiated media stream.
+    ///
+    /// This convenience method lets a host pass a borrowed byte slice without
+    /// constructing the internal [`OutboundMedia`] buffer type. The payload
+    /// is copied into the bounded UDP command queue before this method
+    /// returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Voice`] when the stream is not negotiated, the
+    /// payload exceeds the join limit, the queue is full, or the UDP worker is
+    /// no longer active.
+    pub async fn send_encoded(
+        &self,
+        stream_type: zephyrvox_types::StreamTypeId,
+        payload: impl AsRef<[u8]>,
+    ) -> Result<(), SdkError> {
+        self.inner
+            .transport
+            .send(stream_type, payload)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Receives the next media frame using this handle's shared cursor.
     ///
     /// # Errors
