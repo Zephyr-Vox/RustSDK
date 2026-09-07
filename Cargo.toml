@@ -18,8 +18,10 @@ license = "MIT"
 
 [workspace.dependencies]
 base64 = "0.22.1"
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
 bytes = "1.12"
 futures-util = { version = "0.3.31", default-features = false, features = ["sink", "std"] }
+hkdf = "0.12.4"
 reqwest = { version = "0.12.24", default-features = false, features = [
     "http2",
     "json",
@@ -37,3 +39,4 @@ thiserror = "2.0.18"
 tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "0.27.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2.5.8"
+zeroize = { version = "1.8.2", features = ["derive"] }

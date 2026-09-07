@@ -6,5 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
+bytes.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
 zephyrvox-types = { path = "../zephyrvox-types" }
 zephyrvox-wire = { path = "../zephyrvox-wire" }
