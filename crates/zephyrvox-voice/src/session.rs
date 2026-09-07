@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use bytes::Bytes;
 use tokio::{
     net::UdpSocket,
-    sync::{broadcast, mpsc, oneshot, watch},
+    sync::{Mutex, broadcast, mpsc, oneshot, watch},
+    task::JoinHandle,
 };
 
 use crate::{
@@ -13,6 +14,24 @@ use crate::{
 use zephyrvox_types::{InboundMedia, OutboundMedia, StreamTypeId, VoiceEndpoint, VoiceSessionId};
 
 const MEDIA_QUEUE_CAPACITY: usize = 128;
+
+/// Aborts a worker if startup is canceled before the public handle is ready.
+struct StartupTaskGuard(Option<JoinHandle<()>>);
+
+impl StartupTaskGuard {
+    /// Detaches the task after it has published a successful active status.
+    fn disarm(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for StartupTaskGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
 
 /// A clonable handle to one already-negotiated UDP voice session.
 ///
@@ -144,7 +163,36 @@ impl VoiceSession {
     /// A slow subscriber receives `RecvError::Lagged`; the UDP receive loop is
     /// never blocked by application media processing.
     pub fn subscribe_media(&self) -> broadcast::Receiver<InboundMedia> {
-        self.inner.media_tx.subscribe()
+        let sender = self
+            .inner
+            .media_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(sender) = sender.as_ref() {
+            return sender.subscribe();
+        }
+        closed_media_receiver()
+    }
+
+    /// Receives the next media frame from this session's shared media cursor.
+    ///
+    /// Cloned [`VoiceSession`] handles share this cursor, so concurrent callers
+    /// divide frames between themselves. Hosts that need independent consumers
+    /// should call [`Self::subscribe_media`] and manage each receiver's cursor
+    /// separately. A lagging cursor reports [`VoiceError::MediaLagged`] rather
+    /// than blocking the UDP worker or silently skipping the loss.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::MediaLagged`] when the bounded media history has
+    /// overwritten unread frames, or [`VoiceError::Closed`] after the worker
+    /// and its media channel have stopped.
+    pub async fn recv(&self) -> Result<InboundMedia, VoiceError> {
+        let mut receiver = self.inner.media_rx.lock().await;
+        receiver.recv().await.map_err(|error| match error {
+            broadcast::error::RecvError::Lagged(missed) => VoiceError::MediaLagged { missed },
+            broadcast::error::RecvError::Closed => VoiceError::Closed,
+        })
     }
 
     /// Sends an already encoded media payload on one registered stream type.
@@ -157,22 +205,35 @@ impl VoiceSession {
     /// # Errors
     ///
     /// Returns [`VoiceError::NotActive`] when the session is not active,
+    /// [`VoiceError::Revoked`] when the server withdrew voice authority,
     /// [`VoiceError::QueueFull`] when the bounded media lane is full, or a
-    /// packet/transport error when the payload cannot be sent.
+    /// packet/transport error when local validation or the UDP write fails.
     pub async fn send(
         &self,
         stream_type: StreamTypeId,
         payload: impl AsRef<[u8]>,
     ) -> Result<(), VoiceError> {
-        if !self.status().is_active() {
-            return Err(VoiceError::NotActive);
+        match self.status() {
+            VoiceStatus::Active => {}
+            VoiceStatus::Revoked(reason) => return Err(VoiceError::Revoked(reason)),
+            VoiceStatus::Disconnected => return Err(VoiceError::Closed),
+            VoiceStatus::Idle | VoiceStatus::Joining | VoiceStatus::Disconnecting => {
+                return Err(VoiceError::NotActive);
+            }
         }
+        let payload = payload.as_ref();
+        PacketCodec::validate_media_values(
+            &self.inner.allowed_stream_types,
+            self.inner.max_payload,
+            stream_type,
+            payload.len(),
+        )?;
         let (response, result) = oneshot::channel();
         self.inner
             .command_tx
             .try_send(SessionCommand::Send {
                 stream_type,
-                payload: Bytes::copy_from_slice(payload.as_ref()),
+                payload: Bytes::copy_from_slice(payload),
                 response,
             })
             .map_err(|error| match error {
@@ -183,6 +244,11 @@ impl VoiceSession {
     }
 
     /// Sends the payload from a typed outbound media value.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same lifecycle, queue, packet, and transport errors as
+    /// [`Self::send`].
     pub async fn send_frame(&self, frame: OutboundMedia) -> Result<(), VoiceError> {
         self.send(frame.stream_type, frame.payload).await
     }
@@ -191,16 +257,31 @@ impl VoiceSession {
     ///
     /// This is an orderly local stop. It does not perform HTTP leave and does
     /// not attempt to rejoin; the host owns that control-plane decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::Closed`] if the worker has already stopped before
+    /// it can observe the termination request.
     pub async fn close(&self) -> Result<(), VoiceError> {
         self.request_termination(Termination::Close).await
     }
 
     /// Stops the UDP task and marks the session revoked without rejoining.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::Closed`] if the worker has already stopped before
+    /// it can observe the termination request.
     pub async fn revoke(&self, reason: RevocationReason) -> Result<(), VoiceError> {
         self.request_termination(Termination::Revoke(reason)).await
     }
 
     /// Stops the UDP task for a non-revocation transport/control disconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::Closed`] if the worker has already stopped before
+    /// it can observe the termination request.
     pub async fn disconnect(&self) -> Result<(), VoiceError> {
         self.request_termination(Termination::Disconnect).await
     }
@@ -234,8 +315,10 @@ impl VoiceSession {
     ) -> Result<Self, VoiceError> {
         let endpoint = config.endpoint().clone();
         let codec = PacketCodec::from_config(&config, key_cache.as_ref())?;
+        let allowed_stream_types = codec.allowed_stream_types;
         let (status_tx, _) = watch::channel(VoiceStatus::Joining);
         let (media_tx, _) = broadcast::channel(MEDIA_QUEUE_CAPACITY);
+        let media_rx = media_tx.subscribe();
         let (command_tx, command_rx) = mpsc::channel(MEDIA_QUEUE_CAPACITY);
         let (stop_tx, stop_rx) = watch::channel(None);
         let (started_tx, started_rx) = oneshot::channel();
@@ -246,17 +329,23 @@ impl VoiceSession {
             encrypted: config.encrypted(),
             max_payload: config.max_payload(),
             status_tx,
-            media_tx,
+            media_tx: StdMutex::new(Some(media_tx)),
+            media_rx: Mutex::new(media_rx),
             command_tx,
             stop_tx,
             key_cache,
+            allowed_stream_types,
         });
         let task_inner = Arc::clone(&inner);
-        tokio::spawn(crate::worker::run(
+        let task = tokio::spawn(crate::worker::run(
             task_inner, socket, codec, command_rx, stop_rx, started_tx,
         ));
+        let mut startup_guard = StartupTaskGuard(Some(task));
         match started_rx.await {
-            Ok(Ok(())) => Ok(Self { inner }),
+            Ok(Ok(())) => {
+                startup_guard.disarm();
+                Ok(Self { inner })
+            }
             Ok(Err(error)) => Err(error),
             Err(_) => Err(VoiceError::Closed),
         }
@@ -278,4 +367,12 @@ impl VoiceSession {
         self.wait_until_stopped().await;
         Ok(())
     }
+}
+
+/// Creates a receiver whose sender has already been dropped for a stopped
+/// session, preserving the post-close behavior of [`VoiceSession::recv`].
+fn closed_media_receiver() -> broadcast::Receiver<InboundMedia> {
+    let (sender, receiver) = broadcast::channel(1);
+    drop(sender);
+    receiver
 }

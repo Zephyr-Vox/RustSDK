@@ -20,6 +20,11 @@ pub struct PacketCodec {
 impl PacketCodec {
     /// Builds a codec from validated session negotiation and an optional key
     /// cache for reused encrypted sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::KeyUnavailable`] when an encrypted configuration
+    /// has neither an inline key nor a matching cached key.
     pub fn from_config(
         config: &crate::VoiceSessionConfig,
         cache: Option<&SessionKeyCache>,
@@ -61,6 +66,13 @@ impl PacketCodec {
     }
 
     /// Encodes one client-to-server media datagram.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PacketError::HeartbeatStream`],
+    /// [`PacketError::UnknownStreamType`], [`PacketError::PayloadTooLarge`],
+    /// or [`PacketError::SequenceZero`] when the packet arguments violate the
+    /// negotiated contract.
     pub fn encode_media(
         &self,
         transport_seq: u64,
@@ -73,6 +85,12 @@ impl PacketCodec {
     }
 
     /// Encodes one empty client-to-server heartbeat datagram.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PacketError::SequenceZero`] for the reserved sequence zero or
+    /// [`PacketError::AuthenticationFailed`] when encrypted key material is
+    /// unavailable.
     pub fn encode_heartbeat(&self, transport_seq: u64) -> Result<Vec<u8>, PacketError> {
         self.encode_body(
             transport_seq,
@@ -86,6 +104,10 @@ impl PacketCodec {
 
     /// Encodes a server-to-client media datagram for relay and interoperability
     /// helpers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same packet validation errors as [`Self::encode_media`].
     pub fn encode_server_media(
         &self,
         transport_seq: u64,
@@ -106,6 +128,12 @@ impl PacketCodec {
     }
 
     /// Encodes a one-byte server-to-client revocation notification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PacketError::SequenceZero`] for the reserved sequence zero or
+    /// [`PacketError::AuthenticationFailed`] when encrypted key material is
+    /// unavailable.
     pub fn encode_revocation(
         &self,
         transport_seq: u64,
@@ -127,18 +155,34 @@ impl PacketCodec {
         stream_type: StreamTypeId,
         payload_length: usize,
     ) -> Result<(), PacketError> {
+        Self::validate_media_values(
+            &self.allowed_stream_types,
+            self.max_payload,
+            stream_type,
+            payload_length,
+        )
+    }
+
+    /// Validates media using the immutable negotiation values retained by a
+    /// session handle before a command is admitted to its bounded queue.
+    pub(crate) fn validate_media_values(
+        allowed_stream_types: &[bool; 256],
+        max_payload: usize,
+        stream_type: StreamTypeId,
+        payload_length: usize,
+    ) -> Result<(), PacketError> {
         if stream_type.is_heartbeat() {
             return Err(PacketError::HeartbeatStream);
         }
         if !is_business_stream_type(stream_type.get())
-            || !self.allowed_stream_types[stream_type.get() as usize]
+            || !allowed_stream_types[stream_type.get() as usize]
         {
             return Err(PacketError::UnknownStreamType(stream_type.get()));
         }
-        if payload_length > self.max_payload {
+        if payload_length > max_payload {
             return Err(PacketError::PayloadTooLarge {
                 actual: payload_length,
-                maximum: self.max_payload,
+                maximum: max_payload,
             });
         }
         Ok(())

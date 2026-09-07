@@ -5,7 +5,8 @@ use std::time::Duration;
 use tokio::{net::UdpSocket, time::timeout};
 use zephyrvox_types::StreamTypeId;
 use zephyrvox_voice::{
-    PacketCodec, PacketControl, RevocationReason, SessionKeyCache, VoiceSession, VoiceStatus,
+    PacketCodec, PacketControl, PacketError, RevocationReason, SessionKeyCache, VoiceError,
+    VoiceSession, VoiceStatus,
 };
 
 #[tokio::test]
@@ -23,8 +24,6 @@ async fn session_sends_heartbeat_media_and_receives_relayed_frames() {
     let session = VoiceSession::from_connected_socket(config, client_socket)
         .await
         .expect("voice session");
-    let mut media = session.subscribe_media();
-
     let mut datagram = [0_u8; 1200];
     let length = timeout(Duration::from_secs(1), server.recv(&mut datagram))
         .await
@@ -33,6 +32,17 @@ async fn session_sends_heartbeat_media_and_receives_relayed_frames() {
     let heartbeat = codec.decode_client(&datagram[..length]).expect("heartbeat");
     assert_eq!(heartbeat.transport_seq, 1);
     assert_eq!(heartbeat.control, Some(PacketControl::Heartbeat));
+
+    assert!(matches!(
+        session
+            .send(StreamTypeId::new(1), vec![0_u8; session.max_payload() + 1])
+            .await,
+        Err(VoiceError::Packet(PacketError::PayloadTooLarge { .. }))
+    ));
+    assert!(matches!(
+        session.send(StreamTypeId::new(3), b"unknown").await,
+        Err(VoiceError::Packet(PacketError::UnknownStreamType(3)))
+    ));
 
     session
         .send(StreamTypeId::new(1), b"microphone")
@@ -60,7 +70,7 @@ async fn session_sends_heartbeat_media_and_receives_relayed_frames() {
         .send_to(&inbound, client_address)
         .await
         .expect("relay write");
-    let frame = timeout(Duration::from_secs(1), media.recv())
+    let frame = timeout(Duration::from_secs(1), session.recv())
         .await
         .expect("media receive timeout")
         .expect("media receive");
@@ -72,6 +82,12 @@ async fn session_sends_heartbeat_media_and_receives_relayed_frames() {
 
     session.close().await.expect("close session");
     assert_eq!(session.status(), VoiceStatus::Disconnected);
+    assert!(matches!(
+        timeout(Duration::from_secs(1), session.recv())
+            .await
+            .expect("closed media receiver timeout"),
+        Err(VoiceError::Closed)
+    ));
 }
 
 #[tokio::test]
@@ -142,5 +158,8 @@ async fn encrypted_session_drops_duplicates_and_stops_on_revocation() {
     .await
     .expect("revocation status timeout");
     assert!(key_cache.is_empty());
-    assert!(session.send(StreamTypeId::new(1), b"late").await.is_err());
+    assert!(matches!(
+        session.send(StreamTypeId::new(1), b"late").await,
+        Err(VoiceError::Revoked(RevocationReason::Revoked))
+    ));
 }

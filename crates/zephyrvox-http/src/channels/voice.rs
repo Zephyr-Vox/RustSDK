@@ -101,7 +101,11 @@ impl ChannelApi<'_> {
             .client
             .send_json(request, AuthRequirement::AccessToken { retry_once: true })
             .await?;
-        validate_voice_join(channel_id, &response.data)?;
+        validate_voice_join(
+            channel_id,
+            &response.data,
+            self.client.server_card().scheme().is_tls(),
+        )?;
         Ok(response)
     }
 
@@ -132,6 +136,7 @@ impl ChannelApi<'_> {
 fn validate_voice_join(
     requested_channel_id: Snowflake,
     response: &VoiceJoinResponse,
+    tls_card: bool,
 ) -> Result<(), HttpError> {
     if response.channel.id != requested_channel_id {
         return Err(HttpError::Wire(
@@ -150,6 +155,11 @@ fn validate_voice_join(
             expected: expected_version,
             actual: voice.protocol_version,
         });
+    }
+    if tls_card && !voice.encrypted {
+        return Err(HttpError::Wire(
+            "plaintext voice sessions are not allowed for TLS server cards".to_owned(),
+        ));
     }
     if voice.max_payload == 0 || voice.max_payload > max_payload(voice.encrypted) {
         return Err(HttpError::Wire(

@@ -29,10 +29,12 @@ pub(crate) struct SessionInner {
     pub(crate) encrypted: bool,
     pub(crate) max_payload: usize,
     pub(crate) status_tx: watch::Sender<VoiceStatus>,
-    pub(crate) media_tx: broadcast::Sender<InboundMedia>,
+    pub(crate) media_tx: std::sync::Mutex<Option<broadcast::Sender<InboundMedia>>>,
+    pub(crate) media_rx: tokio::sync::Mutex<broadcast::Receiver<InboundMedia>>,
     pub(crate) command_tx: mpsc::Sender<SessionCommand>,
     pub(crate) stop_tx: watch::Sender<Option<Termination>>,
     pub(crate) key_cache: Option<SessionKeyCache>,
+    pub(crate) allowed_stream_types: [bool; 256],
 }
 
 /// One bounded command sent from a public handle to the UDP worker.
@@ -57,6 +59,19 @@ pub(crate) enum Termination {
     Disconnect,
     /// Explicit server/control-plane revocation.
     Revoke(RevocationReason),
+}
+
+/// Mutable command state grouped so sequence allocation and cancellation are
+/// passed through the worker as one short-lived borrow.
+struct SendState<'a> {
+    /// Stop signal observed while a UDP write is pending.
+    stop_rx: &'a mut watch::Receiver<Option<Termination>>,
+    /// Next client-to-server transport sequence.
+    transport_sequence: &'a mut u64,
+    /// Per-stream channel sequence counters.
+    channel_sequences: &'a mut HashMap<u8, u16>,
+    /// Time at which the last client packet was written.
+    last_outbound: &'a mut Instant,
 }
 
 /// Resolves an advertised endpoint and connects an ephemeral local UDP socket.
@@ -107,8 +122,7 @@ pub(crate) async fn run(
     if let Err(error) =
         send_heartbeat(&socket, &codec, &mut transport_sequence, &mut last_outbound).await
     {
-        remove_cached_key(&inner);
-        publish_status(&inner, VoiceStatus::Disconnected);
+        finish(&inner, VoiceStatus::Disconnected);
         let _ = started_tx.send(Err(error));
         return;
     }
@@ -145,9 +159,12 @@ pub(crate) async fn run(
                     &inner,
                     &socket,
                     &codec,
-                    &mut transport_sequence,
-                    &mut channel_sequences,
-                    &mut last_outbound,
+                    &mut SendState {
+                        stop_rx: &mut stop_rx,
+                        transport_sequence: &mut transport_sequence,
+                        channel_sequences: &mut channel_sequences,
+                        last_outbound: &mut last_outbound,
+                    },
                     command,
                 ).await {
                     return;
@@ -167,16 +184,24 @@ pub(crate) async fn run(
                 }
             }
             _ = heartbeat.tick() => {
-                if last_outbound.elapsed() >= HEARTBEAT_INTERVAL
-                    && send_heartbeat(
-                        &socket,
-                        &codec,
-                        &mut transport_sequence,
-                        &mut last_outbound,
-                    ).await.is_err()
-                {
-                    finish(&inner, VoiceStatus::Disconnected);
-                    return;
+                if last_outbound.elapsed() >= HEARTBEAT_INTERVAL {
+                    let result = tokio::select! {
+                        biased;
+                        changed = stop_rx.changed() => {
+                            finish(&inner, status_after_stop(changed, &stop_rx));
+                            return;
+                        }
+                        result = send_heartbeat(
+                            &socket,
+                            &codec,
+                            &mut transport_sequence,
+                            &mut last_outbound,
+                        ) => result,
+                    };
+                    if result.is_err() {
+                        finish(&inner, VoiceStatus::Disconnected);
+                        return;
+                    }
                 }
             }
         }
@@ -188,9 +213,7 @@ async fn handle_command(
     inner: &SessionInner,
     socket: &UdpSocket,
     codec: &PacketCodec,
-    transport_sequence: &mut u64,
-    channel_sequences: &mut HashMap<u8, u16>,
-    last_outbound: &mut Instant,
+    state: &mut SendState<'_>,
     command: SessionCommand,
 ) -> bool {
     match command {
@@ -199,16 +222,22 @@ async fn handle_command(
             payload,
             response,
         } => {
-            let result = send_media(
-                socket,
-                codec,
-                transport_sequence,
-                channel_sequences,
-                last_outbound,
-                stream_type,
-                &payload,
-            )
-            .await;
+            let result = tokio::select! {
+                biased;
+                changed = state.stop_rx.changed() => {
+                    finish(inner, status_after_stop(changed, state.stop_rx));
+                    return false;
+                }
+                result = send_media(
+                    socket,
+                    codec,
+                    state.transport_sequence,
+                    state.channel_sequences,
+                    state.last_outbound,
+                    stream_type,
+                    &payload,
+                ) => result,
+            };
             let terminal = matches!(
                 result,
                 Err(VoiceError::Transport(_)) | Err(VoiceError::SequenceExhausted)
@@ -267,6 +296,20 @@ fn reserve_transport_sequence(sequence: &mut u64) -> Result<u64, VoiceError> {
     Ok(current)
 }
 
+/// Converts a stop-channel wakeup into the terminal status that owns cleanup.
+fn status_after_stop(
+    changed: Result<(), watch::error::RecvError>,
+    stop_rx: &watch::Receiver<Option<Termination>>,
+) -> VoiceStatus {
+    if changed.is_err() {
+        return VoiceStatus::Disconnected;
+    }
+    match *stop_rx.borrow() {
+        Some(Termination::Close | Termination::Disconnect) | None => VoiceStatus::Disconnected,
+        Some(Termination::Revoke(reason)) => VoiceStatus::Revoked(reason),
+    }
+}
+
 /// Authenticates, replay-checks, and projects one received datagram.
 ///
 /// Returns `false` after a revocation because the worker must not continue to
@@ -294,13 +337,21 @@ fn handle_inbound(
             let Some(speaker_id) = packet.speaker_id else {
                 return true;
             };
-            let _ = inner.media_tx.send(InboundMedia {
-                speaker_id,
-                stream_type: packet.stream_type,
-                channel_seq: packet.channel_seq,
-                transport_seq: packet.transport_seq,
-                payload: packet.payload,
-            });
+            let media_tx = inner
+                .media_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .cloned();
+            if let Some(media_tx) = media_tx {
+                let _ = media_tx.send(InboundMedia {
+                    speaker_id,
+                    stream_type: packet.stream_type,
+                    channel_seq: packet.channel_seq,
+                    transport_seq: packet.transport_seq,
+                    payload: packet.payload,
+                });
+            }
             true
         }
     }
@@ -316,7 +367,17 @@ pub(crate) fn publish_status(inner: &SessionInner, status: VoiceStatus) {
 /// Marks a worker terminal and removes its cached session key.
 fn finish(inner: &SessionInner, status: VoiceStatus) {
     remove_cached_key(inner);
+    close_media(inner);
     publish_status(inner, status);
+}
+
+/// Drops the worker's last media sender so receivers observe terminal close.
+fn close_media(inner: &SessionInner) {
+    let mut media_tx = inner
+        .media_tx
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    media_tx.take();
 }
 
 /// Removes the key for a session after any terminal lifecycle transition.

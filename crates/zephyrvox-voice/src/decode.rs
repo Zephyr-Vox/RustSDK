@@ -74,6 +74,11 @@ impl PacketCodec {
     /// Replay-window admission is deliberately separate from parsing so the
     /// session task can authenticate first and then atomically classify the
     /// transport sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PacketError`] for malformed, unauthenticated, out-of-session,
+    /// or semantically invalid datagrams.
     pub fn decode_server(&self, datagram: &[u8]) -> Result<DecodedPacket, PacketError> {
         self.decode_direction(datagram, false)
     }
@@ -83,6 +88,11 @@ impl PacketCodec {
     /// This direction-aware helper is useful to transport test harnesses and
     /// relay adapters. A production [`VoiceSession`](crate::VoiceSession)
     /// normally only needs [`Self::decode_server`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PacketError`] for malformed, unauthenticated, out-of-session,
+    /// or semantically invalid datagrams.
     pub fn decode_client(&self, datagram: &[u8]) -> Result<DecodedPacket, PacketError> {
         self.decode_direction(datagram, true)
     }

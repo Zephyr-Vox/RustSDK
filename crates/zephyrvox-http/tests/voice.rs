@@ -13,10 +13,21 @@ use zephyrvox_http::{
     AccessToken, ApiClient, HttpError, RefreshToken, RequestOptions, TokenPair, VoiceJoinRequest,
 };
 use zephyrvox_types::{ControlConnectionId, Snowflake, VoiceSessionId};
-use zephyrvox_wire::{ServerCard, TransportScheme};
+use zephyrvox_wire::{Fingerprint, ServerCard, TransportScheme};
 
 fn plain_card() -> ServerCard {
     ServerCard::new("example.test", 80, TransportScheme::Plain, None, None).expect("card")
+}
+
+fn tls_card() -> ServerCard {
+    ServerCard::new(
+        "example.test",
+        443,
+        TransportScheme::Tls,
+        Some(Fingerprint::from_bytes([7; 32])),
+        None,
+    )
+    .expect("card")
 }
 
 fn id(value: u64) -> Snowflake {
@@ -219,4 +230,53 @@ async fn voice_join_rejects_a_response_for_another_channel() {
             .await,
         Err(HttpError::Wire(_))
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn voice_join_rejects_plaintext_media_on_a_tls_card() {
+    let transport = FakeTransport::new(|_| {
+        Ok(envelope(serde_json::json!({
+            "channel": {
+                "id": "102",
+                "group_id": null,
+                "name": "Voice",
+                "mode": "voice",
+                "temporary": false,
+                "visibility": "public",
+                "capacity": 32,
+                "position": 1,
+                "pinned": false,
+                "version": "1"
+            },
+            "members": [],
+            "voice": {
+                "created": false,
+                "session_id": "00112233445566778899aabbccddeeff",
+                "encrypted": false,
+                "warning": "plaintext_mode",
+                "max_payload": 1158,
+                "protocol_version": 1,
+                "expires_at": 2000
+            },
+            "state_cursor": "cursor-1",
+            "state_checkpoint": {
+                "stream_epoch": "00112233445566778899aabbccddeeff",
+                "geid": "9"
+            }
+        })))
+    });
+    let client = ApiClient::with_memory_transport(tls_card(), Arc::new(transport)).expect("client");
+    client.set_tokens(tokens()).await.expect("tokens");
+
+    let result = client
+        .channels()
+        .join_voice(
+            id(102),
+            VoiceJoinRequest::default(),
+            RequestOptions::new().with_control_connection(control_connection()),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(HttpError::Wire(message)) if message.contains("TLS server cards"))
+    );
 }

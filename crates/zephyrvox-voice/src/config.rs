@@ -189,6 +189,12 @@ impl VoiceSessionConfig {
 
     /// Creates a configuration while explicitly checking the shared protocol
     /// version returned by metadata and voice join.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::Configuration`] for an invalid endpoint, expiry,
+    /// payload limit, or key combination, and
+    /// [`VoiceError::ProtocolVersionMismatch`] for an unsupported version.
     pub fn new_with_protocol_version(
         endpoint: VoiceEndpoint,
         session_id: VoiceSessionId,
@@ -238,6 +244,11 @@ impl VoiceSessionConfig {
     ///
     /// An empty list is rejected because it would create a session that can
     /// only send protocol heartbeats. Type zero is always rejected here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoiceError::Configuration`] when the list is empty or
+    /// contains the reserved heartbeat stream.
     pub fn with_stream_types(
         mut self,
         stream_types: impl IntoIterator<Item = StreamTypeId>,

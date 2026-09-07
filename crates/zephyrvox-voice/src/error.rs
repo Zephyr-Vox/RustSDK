@@ -33,6 +33,12 @@ pub enum VoiceError {
     /// The media queue has reached its bounded capacity.
     #[error("voice media queue is full")]
     QueueFull,
+    /// A media receiver fell behind the bounded broadcast history.
+    #[error("voice media receiver lagged by {missed} frames")]
+    MediaLagged {
+        /// Number of frames overwritten before the receiver resumed.
+        missed: u64,
+    },
     /// The session task has already stopped accepting commands.
     #[error("voice session is closed")]
     Closed,
