@@ -109,8 +109,8 @@ async fn connection_performs_snapshot_handoff_and_correlates_commands() {
         .send(WebSocketMessage::Text(
             serde_json::json!({
                 "type": "state.event",
-                "geid": "2",
-                "cursor": "cursor-2",
+                "geid": "0",
+                "cursor": "cursor-0",
                 "class": "state",
                 "scope": {"type": "server"},
                 "event_type": "server.updated",

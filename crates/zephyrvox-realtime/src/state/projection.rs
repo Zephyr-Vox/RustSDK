@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 use crate::StateApplyError;
 use zephyrvox_types::{
-    Channel, ClientState, Geid, Group, Role, SelfUserState, StateEvent, UserPresence,
-    VoiceAuthority, VoiceMembership,
+    Channel, ClientState, Group, Role, SelfUserState, StateEvent, UserPresence, VoiceAuthority,
+    VoiceMembership,
 };
 
 /// Checks envelope, cursor, scope, GEID ordering, and the closed event table
@@ -26,13 +26,10 @@ pub(super) fn validate_event(
             actual: event.geid,
         });
     }
-    let expected = Geid::new(current.geid.get().saturating_add(1));
-    if event.geid != expected {
-        return Err(StateApplyError::GeidGap {
-            expected,
-            actual: event.geid,
-        });
-    }
+    // GEIDs are global, but the server filters state events by recipient
+    // visibility. A client therefore sees legitimate gaps for events that
+    // belong to another user's private scope; only backwards/repeated GEIDs
+    // indicate an ordering violation here.
     if !is_known_state_event(&event.event_type) {
         return Err(StateApplyError::UnknownEvent(event.event_type.clone()));
     }

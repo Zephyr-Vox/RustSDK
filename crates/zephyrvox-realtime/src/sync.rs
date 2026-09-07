@@ -153,8 +153,9 @@ impl SyncMachine {
 
     /// Validates and accepts one replay batch.
     ///
-    /// GEIDs are required to be contiguous and strictly increasing. A gap
-    /// means the snapshot/replay boundary is no longer authoritative.
+    /// Recipient filtering can hide state events from a connection, so GEIDs
+    /// must be strictly increasing but need not be contiguous. The cursor
+    /// and sync handoff remain the authority for the complete server stream.
     pub fn accept_replay(&mut self, replay: &SyncReplay) -> Result<(), SyncError> {
         if self.phase != SyncPhase::Syncing {
             return Err(SyncError::InvalidPhase(format!(
@@ -267,18 +268,16 @@ impl SyncMachine {
         self.phase = SyncPhase::Reconnecting;
     }
 
-    /// Advances the stream boundary only after enforcing contiguous ordering.
+    /// Advances the stream boundary after enforcing monotonic ordering.
+    ///
+    /// The server assigns GEIDs globally, while visibility filtering produces
+    /// intentional gaps for a recipient. Rejecting only backwards or repeated
+    /// values preserves that contract without mistaking hidden events for a
+    /// lost stream.
     fn accept_ordered_event(&mut self, event: &StateEvent) -> Result<(), SyncError> {
         if event.geid <= self.geid {
             return Err(SyncError::GeidOrder {
                 current: self.geid,
-                actual: event.geid,
-            });
-        }
-        let expected = Geid::new(self.geid.get().saturating_add(1));
-        if event.geid != expected {
-            return Err(SyncError::GeidGap {
-                expected,
                 actual: event.geid,
             });
         }

@@ -52,22 +52,20 @@ fn replay_rejects_non_monotonic_events_and_inconsistent_bounds() {
 }
 
 #[test]
-fn replay_rejects_geid_gaps() {
+fn replay_accepts_geid_gaps_created_by_visibility_filtering() {
     let mut machine = SyncMachine::new(&empty_client_state());
     machine.begin_connecting().unwrap();
     machine.accept_ready(control_id()).unwrap();
     machine.begin_sync().unwrap();
 
     let event = state_event(2, "server.updated", serde_json::json!({}));
-    assert!(matches!(
-        machine.accept_replay(&SyncReplay {
+    machine
+        .accept_replay(&SyncReplay {
             from_geid: event.geid,
             to_geid: event.geid,
             events: vec![event],
-        }),
-        Err(SyncError::GeidGap { expected, actual })
-            if expected.get() == 1 && actual.get() == 2
-    ));
+        })
+        .unwrap();
 }
 
 #[test]
