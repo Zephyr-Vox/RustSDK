@@ -106,9 +106,14 @@ impl Client {
             UdpVoiceSession::connect_with_key_cache(config, self.inner.key_cache.clone()).await?;
         if self.inner.stopped.load(Ordering::Acquire)
             || self.inner.connection_generation.load(Ordering::Acquire) != connection_generation
-            || control.status() != ConnectionStatus::Live
             || control.id() != Some(control_id)
         {
+            // A successful join can publish membership and authority events
+            // before the HTTP response returns.  The realtime projection may
+            // then enter an in-place snapshot resync, so `Syncing` is still a
+            // valid phase when the control ID has not changed.  Requiring
+            // `Live` here would turn a committed server join into a local
+            // false-negative and leak an authority until socket teardown.
             let _ = transport.close().await;
             return Err(if self.inner.stopped.load(Ordering::Acquire) {
                 SdkError::Closed
