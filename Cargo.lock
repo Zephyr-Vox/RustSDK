@@ -1685,6 +1685,11 @@ dependencies = [
 name = "zephyrvox-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "url",
  "zephyrvox-http",
  "zephyrvox-realtime",
  "zephyrvox-types",
@@ -1699,6 +1704,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "url",
  "zephyrvox-http",
  "zephyrvox-realtime",
  "zephyrvox-sdk",
